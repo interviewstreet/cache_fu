@@ -42,8 +42,17 @@ module ActsAsCached
       # Map memcache keys to object cache_ids in { memcache_key => object_id } format
       keys_map = Hash[*keys.zip(cache_ids).flatten]
 
+      # get_multi from memory
+      in_memory_hits = Hash[keys.map {|key| [key, (RequestStore.exist?(key) ? RequestStore.store[key] : nil)]}.reject {|k, v| v.nil?}]
+
       # Call get_multi and figure out which keys were missed based on what was a hit
-      hits = Rails.cache.read_multi(*keys) || {}
+      memcache_hits = Rails.cache.read_multi(*(keys - in_memory_hits.keys)) || {}
+
+      # requestcache memcache hits
+      memcache_hits.each {|key, value| unless value.nil? then RequestStore.store[key] = value; end}
+
+      # merge all hits
+      hits = memcache_hits.merge(in_memory_hits)
 
       # Misses can take the form of key => nil
       hits.delete_if { |key, value| value.nil? }
@@ -79,11 +88,16 @@ module ActsAsCached
 
     def set_cache(cache_id, value, options = nil)
       v = value.nil? ? @@nil_sentinel : value
+
+      # options and ttl wouldn't matter as its a request level cache
+      RequestStore.store[cache_key(cache_id)] = v
+
       Rails.cache.write(cache_key(cache_id), v, options)
       value
     end
 
     def expire_cache(cache_id = nil)
+      RequestStore.delete(cache_key(cache_id))
       Rails.cache.delete(cache_key(cache_id))
       true
     end
@@ -142,12 +156,18 @@ module ActsAsCached
     alias :cached :caches
 
     def cached?(cache_id = nil)
-      Rails.cache.exist?(cache_key(cache_id))
+      RequestStore.exist?(cache_key(cache_id)) || Rails.cache.exist?(cache_key(cache_id))
     end
     alias :is_cached? :cached?
 
     def fetch_cache(cache_id)
-      Rails.cache.read(cache_key(cache_id))
+      if RequestStore.exist?(cache_key(cache_id))
+          return RequestStore.store[(cache_key(cache_id))]
+      else
+          hit = Rails.cache.read(cache_key(cache_id))
+          if hit then RequestStore.store[(cache_key(cache_id))] = hit end
+          return hit
+      end
     end
 
     def fetch_cachable_data(cache_id = nil)
